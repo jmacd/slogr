@@ -4,20 +4,19 @@
 
 //! Named tracing events and optional caller-owned sampling.
 
-#![allow(unused_macros)]
+mod event;
 
 use tracing::{Dispatch, Event, Metadata};
 
 #[doc(hidden)]
 pub mod _private {
-    pub use tracing::callsite::{Callsite, DefaultCallsite};
+    pub use super::event::{FAKE_FIELD, FieldName, is_enabled};
+    pub use core::{file, format_args, line, module_path, option::Option, stringify};
+    pub use tracing::callsite::{Callsite, DefaultCallsite, Identifier};
     pub use tracing::dispatcher::get_default;
     pub use tracing::field::ValueSet;
-    pub use tracing::metadata::Kind;
-    pub use tracing::{Event, Level};
-    pub use tracing::{
-        callsite2, debug, error, info, level_enabled, trace, valueset, valueset_all, warn,
-    };
+    pub use tracing::metadata::{Kind, Metadata};
+    pub use tracing::{Event, Level, field, level_filters};
 
     /// Compile-time validator for OpenTelemetry event names used by the
     /// `otel_info!` / `otel_warn!` / `otel_debug!` / `otel_error!` /
@@ -104,18 +103,16 @@ macro_rules! otel_info {
     }};
     (target: $target:expr, $name:expr, $($fields:tt)+) => {{
         const _: () = $crate::_private::validate_event_name($name);
-        $crate::_private::info!(name: $name, target: $target, $($fields)+);
+        $crate::__slogr_emit!(level: $crate::_private::Level::INFO, name: $name, target: $target, $($fields)+);
     }};
     (target: $target:expr, $name:expr) => {{
         const _: () = $crate::_private::validate_event_name($name);
-        $crate::_private::info!(name: $name, target: $target, "");
+        $crate::__slogr_emit!(level: $crate::_private::Level::INFO, name: $name, target: $target, "");
     }};
     ($name:expr, $($fields:tt)+) => {{
         $crate::otel_info!(target: env!("CARGO_PKG_NAME"), $name, $($fields)+);
     }};
-    // The trailing "" is required because tracing macros need at least a format
-    // string or fields. The encoder skips empty strings so no body is encoded.
-    // See: `DirectFieldVisitor::record_str` in encoder.rs.
+    // Keep the upstream empty formatted-message convention for name-only events.
     ($name:expr) => {{
         $crate::otel_info!(target: env!("CARGO_PKG_NAME"), $name);
     }};
@@ -146,11 +143,11 @@ macro_rules! otel_warn {
     }};
     (target: $target:expr, $name:expr, $($fields:tt)+) => {{
         const _: () = $crate::_private::validate_event_name($name);
-        $crate::_private::warn!(name: $name, target: $target, $($fields)+);
+        $crate::__slogr_emit!(level: $crate::_private::Level::WARN, name: $name, target: $target, $($fields)+);
     }};
     (target: $target:expr, $name:expr) => {{
         const _: () = $crate::_private::validate_event_name($name);
-        $crate::_private::warn!(name: $name, target: $target, "");
+        $crate::__slogr_emit!(level: $crate::_private::Level::WARN, name: $name, target: $target, "");
     }};
     ($name:expr, $($fields:tt)+) => {{
         $crate::otel_warn!(target: env!("CARGO_PKG_NAME"), $name, $($fields)+);
@@ -186,11 +183,11 @@ macro_rules! otel_debug {
     }};
     (target: $target:expr, $name:expr, $($fields:tt)+) => {{
         const _: () = $crate::_private::validate_event_name($name);
-        $crate::_private::debug!(name: $name, target: $target, $($fields)+);
+        $crate::__slogr_emit!(level: $crate::_private::Level::DEBUG, name: $name, target: $target, $($fields)+);
     }};
     (target: $target:expr, $name:expr) => {{
         const _: () = $crate::_private::validate_event_name($name);
-        $crate::_private::debug!(name: $name, target: $target, "");
+        $crate::__slogr_emit!(level: $crate::_private::Level::DEBUG, name: $name, target: $target, "");
     }};
     ($name:expr, $($fields:tt)+) => {{
         $crate::otel_debug!(target: env!("CARGO_PKG_NAME"), $name, $($fields)+);
@@ -226,11 +223,11 @@ macro_rules! otel_error {
     }};
     (target: $target:expr, $name:expr, $($fields:tt)+) => {{
         const _: () = $crate::_private::validate_event_name($name);
-        $crate::_private::error!(name: $name, target: $target, $($fields)+);
+        $crate::__slogr_emit!(level: $crate::_private::Level::ERROR, name: $name, target: $target, $($fields)+);
     }};
     (target: $target:expr, $name:expr) => {{
         const _: () = $crate::_private::validate_event_name($name);
-        $crate::_private::error!(name: $name, target: $target, "");
+        $crate::__slogr_emit!(level: $crate::_private::Level::ERROR, name: $name, target: $target, "");
     }};
     ($name:expr, $($fields:tt)+) => {{
         $crate::otel_error!(target: env!("CARGO_PKG_NAME"), $name, $($fields)+);
@@ -271,19 +268,19 @@ macro_rules! otel_event {
         const _: () = $crate::_private::validate_event_name($name);
         match $level {
             $crate::_private::Level::TRACE => {
-                $crate::_private::trace!(name: $name, target: $target, $($fields)+);
+                $crate::__slogr_emit!(level: $crate::_private::Level::TRACE, name: $name, target: $target, $($fields)+);
             }
             $crate::_private::Level::DEBUG => {
-                $crate::_private::debug!(name: $name, target: $target, $($fields)+);
+                $crate::__slogr_emit!(level: $crate::_private::Level::DEBUG, name: $name, target: $target, $($fields)+);
             }
             $crate::_private::Level::INFO => {
-                $crate::_private::info!(name: $name, target: $target, $($fields)+);
+                $crate::__slogr_emit!(level: $crate::_private::Level::INFO, name: $name, target: $target, $($fields)+);
             }
             $crate::_private::Level::WARN => {
-                $crate::_private::warn!(name: $name, target: $target, $($fields)+);
+                $crate::__slogr_emit!(level: $crate::_private::Level::WARN, name: $name, target: $target, $($fields)+);
             }
             $crate::_private::Level::ERROR => {
-                $crate::_private::error!(name: $name, target: $target, $($fields)+);
+                $crate::__slogr_emit!(level: $crate::_private::Level::ERROR, name: $name, target: $target, $($fields)+);
             }
         }
     }};
@@ -291,19 +288,19 @@ macro_rules! otel_event {
         const _: () = $crate::_private::validate_event_name($name);
         match $level {
             $crate::_private::Level::TRACE => {
-                $crate::_private::trace!(name: $name, target: $target, "");
+                $crate::__slogr_emit!(level: $crate::_private::Level::TRACE, name: $name, target: $target, "");
             }
             $crate::_private::Level::DEBUG => {
-                $crate::_private::debug!(name: $name, target: $target, "");
+                $crate::__slogr_emit!(level: $crate::_private::Level::DEBUG, name: $name, target: $target, "");
             }
             $crate::_private::Level::INFO => {
-                $crate::_private::info!(name: $name, target: $target, "");
+                $crate::__slogr_emit!(level: $crate::_private::Level::INFO, name: $name, target: $target, "");
             }
             $crate::_private::Level::WARN => {
-                $crate::_private::warn!(name: $name, target: $target, "");
+                $crate::__slogr_emit!(level: $crate::_private::Level::WARN, name: $name, target: $target, "");
             }
             $crate::_private::Level::ERROR => {
-                $crate::_private::error!(name: $name, target: $target, "");
+                $crate::__slogr_emit!(level: $crate::_private::Level::ERROR, name: $name, target: $target, "");
             }
         }
     }};
@@ -323,8 +320,8 @@ macro_rules! __otel_logger_event {
         const _: () = $crate::_private::validate_event_name($name);
         use $crate::_private::Callsite;
 
-        if $crate::_private::level_enabled!($level) {
-            static __CALLSITE: $crate::_private::DefaultCallsite = $crate::_private::callsite2! {
+        if $crate::__slogr_level_enabled!($level) {
+            static __CALLSITE: $crate::_private::DefaultCallsite = $crate::__slogr_callsite! {
                 name: $name,
                 kind: $crate::_private::Kind::EVENT,
                 target: $target,
@@ -340,12 +337,12 @@ macro_rules! __otel_logger_event {
                 // Evaluate the logger / should_sample / arguments before dispatch.
                 let logger = &mut ($logger);
                 if $crate::Sampler::should_sample(logger, metadata) {
-                    (|values: $crate::_private::ValueSet<'_>| {
+                    $crate::__slogr_valueset_all!(metadata.fields(), |values: $crate::_private::ValueSet<'_>| {
                         let event = $crate::_private::Event::new(metadata, &values);
                         $crate::_private::get_default(|dispatch| {
                             $crate::Logger::emit(logger, &event, dispatch);
                         });
-                    })($crate::_private::valueset_all!(metadata.fields(), $($($fields)+)?));
+                    }; $($($fields)+)?);
                 }
             }
         }
@@ -359,7 +356,7 @@ macro_rules! __otel_logger_event {
 /// Returns an [`std::io::Result`] so output failures are not silently discarded.
 ///
 /// Note! the way this is written, it supports the full `tracing` syntax for
-/// debug and display formatting of field values, following tracing::valueset!
+/// debug and display formatting of field values, using the local value-set macros,
 /// where ? signifies debug and % signifies display.
 ///
 /// ```no_run
@@ -391,7 +388,7 @@ macro_rules! __log_record_impl {
         use $crate::_private::Callsite;
         use $crate::StackLogRecord;
 
-        static __CALLSITE: $crate::_private::DefaultCallsite = $crate::_private::callsite2! {
+        static __CALLSITE: $crate::_private::DefaultCallsite = $crate::__slogr_callsite! {
             name: $name,
             kind: $crate::_private::Kind::EVENT,
             target: env!("CARGO_PKG_NAME"),
@@ -401,10 +398,9 @@ macro_rules! __log_record_impl {
 
         let meta = __CALLSITE.metadata();
 
-        // Use closure to extend valueset lifetime (same pattern as tracing::event!)
-        (|valueset: $crate::_private::ValueSet<'_>| {
+        $crate::__slogr_valueset!(meta.fields(), |valueset: $crate::_private::ValueSet<'_>| {
             let event = $crate::_private::Event::new(meta, &valueset);
             StackLogRecord::new(&event)
-        })($crate::_private::valueset!(meta.fields(), $($($fields)*)?))
+        }; $($($fields)*)?)
     }};
 }

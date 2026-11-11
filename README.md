@@ -22,6 +22,25 @@ configuration, export batching, transport, global initialization, and output
 queues are intentionally absent. Span fields and trace/span IDs are not captured.
 The `otel_*` macro names are retained to keep this extraction close to its source.
 
+## Locally owned macros
+
+The public calling conventions live in `src/macros.rs`. The necessary event
+macro machinery from `tracing` is copied into `src/macros/event.rs`: argument
+normalization, field names and values, callsite metadata, level checks, and
+event dispatch. Logging macros no longer expand through upstream tracing macros
+or use its private macro-support module.
+
+Tracing still supplies runtime types, callsite registration and interest caching,
+static/runtime level ceilings, the dispatcher, and subscriber integration.
+Existing `otel_*` syntax, lazy field evaluation, caller-owned sampling, parent
+semantics, and direct encoding are preserved. Compatibility tests compare local
+events with upstream events before future syntax changes.
+
+Only the currently used event machinery is copied. Span macros, instrumentation
+attributes, unnamed/untargeted macro forms, and the optional legacy `log` backend
+are not vendored. Enabling `tracing/log` elsewhere does not add a `log` backend
+to slogr's locally owned macros.
+
 ## Capture encoded records
 
 ```rust
@@ -127,5 +146,6 @@ comments and keep fixtures isolated from global subscriber state.
 
 ## Provenance and license
 
-Apache-2.0; original OpenTelemetry copyright notices are retained. See the
-`LICENSE` and `NOTICE` files for extraction provenance and changes.
+The logging implementation is Apache-2.0; the vendored tracing macro machinery
+is MIT. Original OpenTelemetry and Tokio copyright notices are retained. See
+`LICENSE`, `LICENSE-TRACING`, and `NOTICE` for terms, provenance, and changes.
