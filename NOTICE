@@ -1,0 +1,25 @@
+slogr contains code derived from OpenTelemetry Arrow.
+Copyright The OpenTelemetry Authors
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Source repository: https://github.com/jmacd/otel-arrow
+Source revision: 351e0e59db18cebfb542bdc5aed2e181b0f5c974
+Source branch at extraction: jmacd/encode_any_value
+
+Extracted from rust/otap-dataflow/crates:
+  telemetry/src/self_tracing.rs and self_tracing/{encoder,formatter,structured}.rs
+  telemetry/src/internal_events.rs
+  pdata/src/otlp/common.rs (bounded protobuf buffers only)
+  pdata/src/proto/consts.rs (common/log fields only)
+  pdata/src/views/otlp/bytes/{common,decode,logs}.rs (formatting dependencies only)
+  pdata-views/src/views/{common,logs}.rs (required view traits only)
+  pdata/src/proto/opentelemetry.proto.{common,logs}.v1.rs (test-only types)
+
+Changes for this standalone distribution:
+  Removed engine context, configuration, registries, export batching, metrics,
+  lifecycle reporting, serialization adapters, and process-wide output services.
+  Rebased modules/imports onto a single independent crate.
+  Added a callback-based tracing layer and fallible synchronous console writes.
+  Carried record-level dropped-attribute counts into console formatting.
+  Retained the scalar fast path, structured encoding, and bounded buffer logic.
+  Retained focused source tests and added standalone integration coverage.
