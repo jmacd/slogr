@@ -4,14 +4,21 @@
 use slogr::buffer::{BoundedBuf, ProtoBuffer};
 use slogr::views::{AnyValueView, AttributeView, LogRecordView, RawLogRecord};
 use slogr::{
-    EncodeResult, Level, LogRecord, LogRecordLayer, Logger, Sampler, StructBox, StructuredValue,
-    ValueWriter, otel_debug, otel_error, otel_event, otel_info, otel_warn,
+    Attribute, EncodeResult, Level, LogRecord, LogRecordLayer, Logger, Sampler, StructBox,
+    StructuredValue, ValueWriter, otel_debug, otel_error, otel_event, otel_info, otel_warn,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use tracing::instrument::WithSubscriber;
 use tracing_subscriber::{filter::LevelFilter, prelude::*};
+
+static POINT: Attribute<dyn std::error::Error> = Attribute::new("point", "Current position");
+static ANSWER: Attribute<u64> = Attribute::new("answer", "Answer");
+static REASON: Attribute<str> = Attribute::new("reason", "Failure reason");
+static READY: Attribute<bool> = Attribute::new("ready", "Readiness");
+static VALUE: Attribute<str> = Attribute::new("value", "Payload");
+static TAIL: Attribute<bool> = Attribute::new("tail", "Trailing field");
 
 /// Scenario: a Tokio future logs mutable, thread-local structured state before and after an await.
 /// Guarantees: the layer captures owned typed snapshots, independent of later mutations and lifetimes.
@@ -35,10 +42,10 @@ async fn tokio_events_capture_structured_snapshots() {
     let state = Rc::new(RefCell::new(1));
     let point = StructBox::new(Point(Rc::clone(&state)));
     async {
-        otel_info!("point.before", point = point.as_struct());
+        otel_info!("point.before", POINT = point.as_struct());
         tokio::task::yield_now().await;
         *state.borrow_mut() = 2;
-        otel_info!("point.after", point = point.as_struct());
+        otel_info!("point.after", POINT = point.as_struct());
     }
     .with_subscriber(subscriber)
     .await;
@@ -65,8 +72,15 @@ async fn tokio_events_capture_structured_snapshots() {
                 .contains(&format!("point={{x={expected}}}"))
         );
     }
-    assert_eq!(records[0].callsite().name(), "point.before");
-    assert_eq!(records[1].callsite().name(), "point.after");
+    for (record, body) in records.iter().zip(["point.before", "point.after"]) {
+        assert_eq!(
+            RawLogRecord::new(&record.body_attrs_bytes)
+                .body()
+                .unwrap()
+                .as_string(),
+            Some(body.as_bytes())
+        );
+    }
 }
 
 /// Scenario: standalone macros use caller-owned sampling under a subscriber severity filter.
@@ -99,21 +113,21 @@ fn filtering_and_sampling_remain_lazy() {
         calls: 0,
     };
     tracing::subscriber::with_default(subscriber, || {
-        otel_debug!(logger: {
+        otel_debug!("filtered", logger: {
             evaluations.set(evaluations.get() + 1);
             &mut sampler
-        }, "filtered");
-        otel_info!(logger: sampler, "rejected", message = {
+        });
+        otel_info!({
             evaluations.set(evaluations.get() + 1);
             "not evaluated"
-        });
+        }, logger: sampler);
         sampler.keep = true;
-        otel_info!(logger: sampler, "accepted", answer = 42);
-        otel_warn!(logger: &mut sampler, "warn", "answer {}", 42);
-        otel_error!(target: "application", logger: sampler, "error", reason = %"failure");
-        otel_event!(Level::TRACE, "filtered.dynamic");
-        otel_event!(Level::WARN, "dynamic", ready = true);
-        otel_event!(Level::INFO, "empty");
+        otel_info!("accepted", logger: sampler, ANSWER = 42);
+        otel_warn!("warn", logger: &mut sampler, ANSWER = 42);
+        otel_error!("error", logger: sampler, REASON = "failure");
+        otel_event!("filtered.dynamic", Level::TRACE);
+        otel_event!("dynamic", Level::WARN, READY = true);
+        otel_event!("empty", Level::INFO);
     });
     assert_eq!(sampler.calls, 4);
     assert_eq!(evaluations.get(), 0);
@@ -126,11 +140,17 @@ fn filtering_and_sampling_remain_lazy() {
         ("dynamic", Level::WARN),
         ("empty", Level::INFO),
     ]) {
-        assert_eq!(record.callsite().name(), name);
+        assert_eq!(
+            RawLogRecord::new(&record.body_attrs_bytes)
+                .body()
+                .unwrap()
+                .as_string(),
+            Some(name.as_bytes())
+        );
         assert_eq!(*record.callsite().level(), level);
     }
-    assert_eq!(records[2].callsite().target(), "application");
-    assert!(records[1].to_string().contains("answer 42"));
+    assert_eq!(records[2].callsite().target(), "slogr");
+    assert!(records[1].to_string().contains("answer=42"));
 }
 
 /// Scenario: a caller-owned logger snapshots an oversized event under custom limits and exports it.
@@ -150,7 +170,7 @@ fn custom_budgets_and_atomic_export() {
     let mut capture = Capture::default();
     let large = "x".repeat(4096);
     tracing::subscriber::with_default(subscriber, || {
-        otel_info!(logger: capture, "bounded", value = large.as_str(), tail = true);
+        otel_info!("bounded", logger: capture, VALUE = large.as_str(), TAIL = true);
     });
     assert_eq!(capture.0.len(), 1);
     let record = &capture.0[0];

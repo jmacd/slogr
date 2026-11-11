@@ -1,106 +1,49 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use slogr::{Level, LogRecord};
+use slogr::views::{AnyValueView, AttributeView, LogRecordView, RawLogRecord};
+use slogr::{Attribute, Level, LogRecord};
 use std::cell::Cell;
 use std::sync::{Arc, Mutex};
-use tracing::field::{Field, Visit};
 use tracing::{Event, Metadata, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::prelude::*;
 
-#[derive(Debug, PartialEq)]
-struct Snapshot {
-    name: &'static str,
-    target: &'static str,
-    level: Level,
-    file: Option<&'static str>,
-    module: Option<&'static str>,
-    fields: Vec<&'static str>,
-    values: Vec<(&'static str, &'static str, String)>,
-    encoded: bytes::Bytes,
-    dropped: u16,
-    contextual: bool,
-    root: bool,
-    parent: Option<tracing::span::Id>,
-}
-
-#[derive(Default)]
-struct Values(Vec<(&'static str, &'static str, String)>);
-
-impl Visit for Values {
-    fn record_i64(&mut self, field: &Field, value: i64) {
-        self.0.push((field.name(), "i64", value.to_string()));
-    }
-    fn record_u64(&mut self, field: &Field, value: u64) {
-        self.0.push((field.name(), "u64", value.to_string()));
-    }
-    fn record_f64(&mut self, field: &Field, value: f64) {
-        self.0.push((field.name(), "f64", value.to_string()));
-    }
-    fn record_bool(&mut self, field: &Field, value: bool) {
-        self.0.push((field.name(), "bool", value.to_string()));
-    }
-    fn record_str(&mut self, field: &Field, value: &str) {
-        self.0.push((field.name(), "str", value.to_owned()));
-    }
-    fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
-        self.0.push((field.name(), "error", value.to_string()));
-    }
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        self.0.push((field.name(), "debug", format!("{value:?}")));
-    }
-}
+static COUNT: Attribute<u64> = Attribute::new("count", "Number of items");
+static READY: Attribute<bool> = Attribute::new("ready", "Readiness");
 
 #[derive(Clone, Default)]
 struct Capture {
     // A tracing Dispatch is shareable; the mutex lets tests inspect its captured events.
-    events: Arc<Mutex<Vec<(u32, Snapshot)>>>,
+    events: Arc<Mutex<Vec<LogRecord>>>,
 }
 
 impl<S: Subscriber> Layer<S> for Capture {
     fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
-        let metadata = event.metadata();
-        let mut values = Values::default();
-        event.record(&mut values);
-        let record = LogRecord::new(event);
-        self.events.lock().unwrap().push((
-            metadata.line().expect("callsite line"),
-            Snapshot {
-                name: metadata.name(),
-                target: metadata.target(),
-                level: *metadata.level(),
-                file: metadata.file(),
-                module: metadata.module_path(),
-                fields: metadata.fields().iter().map(|field| field.name()).collect(),
-                values: values.0,
-                encoded: record.body_attrs_bytes,
-                dropped: record.dropped_attributes_count,
-                contextual: event.is_contextual(),
-                root: event.is_root(),
-                parent: event.parent().cloned(),
-            },
-        ));
+        self.events.lock().unwrap().push(LogRecord::new(event));
     }
 }
 
-impl Capture {
-    fn assert_pairs(&self, count: usize) {
-        let events = self.events.lock().unwrap();
-        assert_eq!(events.len(), count * 2);
-        for pair in events.chunks_exact(2) {
-            assert_ne!(pair[0].0, 0);
-            assert_ne!(pair[1].0, 0);
-            assert_eq!(pair[0].1, pair[1].1);
-        }
-    }
+fn body(record: &LogRecord) -> String {
+    let view = RawLogRecord::new(&record.body_attrs_bytes);
+    String::from_utf8(view.body().unwrap().as_string().unwrap().to_vec()).unwrap()
 }
 
-/// Scenario: upstream and local event macros receive the same scalar, formatted, and structured fields.
-/// Guarantees: field names, order, visitor dispatch, metadata, and encoded payloads remain identical.
+/// Scenario: typed descriptors are imported, aliased, and qualified while native tracing emits equivalent values.
+/// Guarantees: descriptor names become wire keys and scalar/structured native encodings remain unchanged.
 #[test]
-fn field_syntax_matches_upstream() {
+fn typed_attributes_match_native_encoding() {
     use slogr::{EncodeResult, StructBox, StructuredValue, ValueWriter};
+
+    mod declared {
+        use slogr::Attribute;
+        pub static COUNT: Attribute<u64> = Attribute::new("item.count", "Number of items");
+        pub static TEXT: Attribute<str> = Attribute::new("literal.key", "MUST NOT BE EMITTED");
+    }
+    use declared::COUNT as my_attribute;
+    static SIGNED: Attribute<i64> = Attribute::new("signed", "Signed integer");
+    static FLOAT: Attribute<f64> = Attribute::new("float", "Ratio");
+    static POINT: Attribute<dyn std::error::Error> = Attribute::new("point", "Position");
 
     struct Point;
     impl StructuredValue for Point {
@@ -108,69 +51,97 @@ fn field_syntax_matches_upstream() {
             value.encode_map(&mut |map| map.encode_entry("x", &mut |v| v.encode_i64(7)))
         }
     }
-    struct Detail {
-        r#type: &'static str,
-    }
-    let detail = Detail { r#type: "kind" };
     let point = StructBox::new(Point);
-    let value = 42;
-    const KEY: &str = "constant.key";
     let capture = Capture::default();
     let subscriber = tracing_subscriber::registry().with(capture.clone());
     tracing::subscriber::with_default(subscriber, || {
-        macro_rules! pair {
-            ($($fields:tt)+) => {
-                tracing::info!(name: "parity", target: "test", $($fields)+);
-                slogr::otel_info!(target: "test", "parity", $($fields)+);
-            };
-        }
-        pair!(
+        tracing::info!(
+            message = "A body with spaces",
+            item.count = 42u64,
             signed = -7i64,
-            unsigned = u64::MAX,
             float = 1.25,
-            flag = true,
-            text = "text"
+            ready = true,
+            "literal.key" = String::from("temporary"),
+            point = point.as_struct(),
         );
-        pair!(value, ?detail.r#type, %value, r#type = "raw", dotted.r#type = 3);
-        pair!(first = 1, "literal.key" = ?Some(2), { KEY } = %"constant",);
-        pair!({ "literal.key" = 1, { KEY } = true }, "message {}", value);
-        pair!(
-            first = 1,
-            text = debug(&value),
-            shown = display(&value),
-            "answer {value}"
+        slogr::otel_info!(
+            String::from("A body with spaces"),
+            my_attribute = 42,
+            SIGNED = -7,
+            FLOAT = 1.25,
+            READY = true,
+            declared::TEXT = String::from("temporary"),
+            POINT = point.as_struct(),
         );
-        pair!(point = point.as_struct(), message = point.as_struct());
-        pair!(message = "");
-        pair!("{}", "");
-        pair!(before = 1, message = "explicit", after = 2);
     });
-    capture.assert_pairs(9);
+    let events = capture.events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].body_attrs_bytes, events[1].body_attrs_bytes);
+    assert_eq!(events[1].dropped_attributes_count, 0);
+    let view = RawLogRecord::new(&events[1].body_attrs_bytes);
+    assert_eq!(
+        view.attributes()
+            .map(|attribute| attribute.key().to_vec())
+            .collect::<Vec<_>>(),
+        [
+            "item.count",
+            "signed",
+            "float",
+            "ready",
+            "literal.key",
+            "point"
+        ]
+        .map(|name| name.as_bytes().to_vec()),
+    );
+    assert!(!events[1].to_string().contains("MUST NOT BE EMITTED"));
 }
 
-/// Scenario: named events use explicit, root, and contextual parents and every supported level.
-/// Guarantees: local macros retain tracing parent semantics, empty-message behavior, and caller source locations.
+/// Scenario: bodies include empty and brace-containing strings, and attributes use message and internal-marker names.
+/// Guarantees: the first string alone is the body; every declared field, even message, remains an ordinary attribute.
 #[test]
-fn parents_levels_and_locations_match_upstream() {
+fn body_and_attribute_names_are_independent() {
+    static MESSAGE: Attribute<u64> = Attribute::new("message", "An ordinary numeric attribute");
+    static MARKER: Attribute<str> = Attribute::new("__slogr_body", "An ordinary string attribute");
     let capture = Capture::default();
     let subscriber = tracing_subscriber::registry().with(capture.clone());
     tracing::subscriber::with_default(subscriber, || {
-        let parent = tracing::info_span!("parent");
-        let _entered = parent.enter();
-        tracing::info!(name: "parented", target: "test", parent: &parent, ready = true);
-        slogr::otel_info!(target: "test", "parented", parent: &parent, ready = true);
-        tracing::info!(name: "root", target: "test", parent: None, "root message");
-        slogr::otel_info!(target: "test", "root", parent: None, "root message");
-        tracing::info!(name: "contextual", target: "test", message = "current");
-        slogr::otel_info!(target: "test", "contextual", message = "current");
+        for text in ["", "Literal {} braces are not formatting"] {
+            slogr::otel_info!(text, MESSAGE = 7, MARKER = "attribute");
+        }
+    });
+    let events = capture.events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    let stack =
+        slogr::__log_record_impl!(Level::INFO, "", MESSAGE = 7, MARKER = "attribute").into_record();
+    for (record, expected) in events.iter().chain(std::iter::once(&stack)).zip([
+        "",
+        "Literal {} braces are not formatting",
+        "",
+    ]) {
+        assert_eq!(body(record), expected);
+        let view = RawLogRecord::new(&record.body_attrs_bytes);
+        let attrs = view.attributes().collect::<Vec<_>>();
+        assert_eq!(attrs.len(), 2);
+        assert_eq!(attrs[0].key(), b"message");
+        assert_eq!(attrs[0].value().unwrap().as_int64(), Some(7));
+        assert_eq!(attrs[1].key(), b"__slogr_body");
+        assert_eq!(
+            attrs[1].value().unwrap().as_string(),
+            Some(b"attribute".as_slice())
+        );
+    }
+}
 
-        tracing::debug!(name: "debug", target: "slogr", "");
+/// Scenario: fixed and runtime level macros generate events from body-first calls.
+/// Guarantees: severity, required bodies, and source locations survive without explicit name/parent syntax.
+#[test]
+fn levels_and_locations_are_preserved() {
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::registry().with(capture.clone());
+    tracing::subscriber::with_default(subscriber, || {
         slogr::otel_debug!("debug");
-        tracing::info!(name: "info", target: "slogr", "");
         slogr::otel_info!("info");
-        tracing::warn!(name: "warn", target: "slogr", "");
         slogr::otel_warn!("warn");
-        tracing::error!(name: "error", target: "slogr", "");
         slogr::otel_error!("error");
         for level in [
             Level::TRACE,
@@ -179,28 +150,44 @@ fn parents_levels_and_locations_match_upstream() {
             Level::WARN,
             Level::ERROR,
         ] {
-            match level {
-                Level::TRACE => tracing::trace!(name: "dynamic", target: "slogr", number = 1),
-                Level::DEBUG => tracing::debug!(name: "dynamic", target: "slogr", number = 1),
-                Level::INFO => tracing::info!(name: "dynamic", target: "slogr", number = 1),
-                Level::WARN => tracing::warn!(name: "dynamic", target: "slogr", number = 1),
-                Level::ERROR => tracing::error!(name: "dynamic", target: "slogr", number = 1),
-            }
-            slogr::otel_event!(level, "dynamic", number = 1);
+            slogr::otel_event!("dynamic", level, COUNT = 1);
         }
-    });
-    capture.assert_pairs(12);
-
-    let subscriber = tracing_subscriber::registry().with(capture.clone());
-    tracing::subscriber::with_default(subscriber, || {
         let expected = line!() + 1;
         slogr::otel_info!("location");
         let events = capture.events.lock().unwrap();
-        let (line, event) = events.last().unwrap();
-        assert_eq!(*line, expected);
-        assert_eq!(event.file, Some(file!()));
-        assert_eq!(event.module, Some(module_path!()));
+        let callsite = events.last().unwrap().callsite();
+        assert_eq!(callsite.line(), Some(expected));
+        assert_eq!(callsite.file(), Some(file!()));
+        assert_eq!(callsite.target(), "slogr");
+        assert!(callsite.name().starts_with("event "));
     });
+    let events = capture.events.lock().unwrap();
+    assert_eq!(events.len(), 10);
+    assert_eq!(
+        events
+            .iter()
+            .take(9)
+            .map(|event| *event.callsite().level())
+            .collect::<Vec<_>>(),
+        [
+            Level::DEBUG,
+            Level::INFO,
+            Level::WARN,
+            Level::ERROR,
+            Level::TRACE,
+            Level::DEBUG,
+            Level::INFO,
+            Level::WARN,
+            Level::ERROR
+        ],
+    );
+    assert_eq!(
+        events.iter().map(body).collect::<Vec<_>>(),
+        [
+            "debug", "info", "warn", "error", "dynamic", "dynamic", "dynamic", "dynamic",
+            "dynamic", "location"
+        ],
+    );
 }
 
 #[derive(Default)]
@@ -215,63 +202,66 @@ impl<S: Subscriber> Layer<S> for Gate {
     fn register_callsite(&self, _: &'static Metadata<'static>) -> tracing::subscriber::Interest {
         tracing::subscriber::Interest::sometimes()
     }
-
     fn enabled(&self, _: &Metadata<'_>, _: Context<'_, S>) -> bool {
         self.0.lock().unwrap().enabled
     }
-
     fn event_enabled(&self, _: &Event<'_>, _: Context<'_, S>) -> bool {
         self.0.lock().unwrap().event_enabled
     }
 }
 
-/// Scenario: a cached callsite encounters changing metadata/event filters and fields that log recursively.
-/// Guarantees: metadata rejection skips field evaluation, event rejection follows evaluation, and nested events survive.
+/// Scenario: a cached callsite encounters changing filters and attribute expressions that log recursively.
+/// Guarantees: metadata rejection skips both body and attributes, event rejection follows evaluation, and nested events survive.
 #[test]
-fn filtering_and_reentrant_fields_match_upstream() {
-    fn emit(evaluations: &Cell<usize>) {
+fn filtering_keeps_body_and_attributes_lazy() {
+    fn emit(bodies: &Cell<usize>, values: &Cell<usize>) {
         slogr::otel_info!(
-            "outer",
-            value = {
-                evaluations.set(evaluations.get() + 1);
-                slogr::otel_info!("inner", nested = true);
+            {
+                bodies.set(bodies.get() + 1);
+                "outer"
+            },
+            COUNT = {
+                values.set(values.get() + 1);
+                slogr::otel_info!("inner", READY = true);
                 1
             }
         );
     }
-
     let capture = Capture::default();
-    // The same state is controlled by the test and read by the shareable subscriber.
+    // The test controls this state while the shareable subscriber reads it.
     let gate = Arc::new(Mutex::new(GateState::default()));
     let subscriber = tracing_subscriber::registry()
         .with(capture.clone())
         .with(Gate(Arc::clone(&gate)));
-    let evaluations = Cell::new(0);
+    let bodies = Cell::new(0);
+    let values = Cell::new(0);
     tracing::subscriber::with_default(subscriber, || {
-        emit(&evaluations);
-        assert_eq!(evaluations.get(), 0);
+        emit(&bodies, &values);
+        assert_eq!((bodies.get(), values.get()), (0, 0));
         gate.lock().unwrap().enabled = true;
-        emit(&evaluations);
-        assert_eq!(evaluations.get(), 1);
+        emit(&bodies, &values);
+        assert_eq!((bodies.get(), values.get()), (1, 1));
         assert!(capture.events.lock().unwrap().is_empty());
         gate.lock().unwrap().event_enabled = true;
-        emit(&evaluations);
+        emit(&bodies, &values);
         gate.lock().unwrap().enabled = false;
-        emit(&evaluations);
+        emit(&bodies, &values);
     });
-    assert_eq!(evaluations.get(), 2);
-    let events = capture.events.lock().unwrap();
+    assert_eq!((bodies.get(), values.get()), (2, 2));
     assert_eq!(
-        events
+        capture
+            .events
+            .lock()
+            .unwrap()
             .iter()
-            .map(|(_, event)| event.name)
+            .map(body)
             .collect::<Vec<_>>(),
         ["inner", "outer"]
     );
 }
 
 /// Scenario: dependency features impose a compile-time maximum event level.
-/// Guarantees: local events honor tracing's static ceiling without evaluating disabled fields or filtering raw stack records.
+/// Guarantees: disabled bodies stay unevaluated while raw stack records bypass level filtering.
 #[test]
 fn compile_time_level_filter() {
     let capture = Capture::default();
@@ -287,12 +277,12 @@ fn compile_time_level_filter() {
     tracing::subscriber::with_default(subscriber, || {
         for level in levels {
             slogr::otel_event!(
-                level,
-                "static",
-                value = {
+                {
                     evaluations.set(evaluations.get() + 1);
-                    1
-                }
+                    "static"
+                },
+                level,
+                COUNT = 1
             );
         }
     });
@@ -305,10 +295,10 @@ fn compile_time_level_filter() {
     assert_eq!(
         events
             .iter()
-            .map(|(_, event)| event.level)
+            .map(|event| *event.callsite().level())
             .collect::<Vec<_>>(),
         expected
     );
-    let raw = slogr::__log_record_impl!(Level::TRACE, "unfiltered", answer = 42);
-    assert!(!raw.as_view().body_attrs_bytes.is_empty());
+    let raw = slogr::__log_record_impl!(Level::TRACE, "unfiltered", COUNT = 42);
+    assert_eq!(body(&raw.into_record()), "unfiltered");
 }

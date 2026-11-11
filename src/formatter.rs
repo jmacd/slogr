@@ -317,9 +317,7 @@ impl StyledBufWriter<'_> {
     fn write_body_and_attrs<V: LogRecordView>(&mut self, record: &V, has_event_name: bool) {
         let body = record.body();
         let mut attrs = record.attributes().peekable();
-        // Treat an empty-string body as absent. The otel_*! macros produce
-        // an empty body because tracing requires at least a format string.
-        // See also: `DirectFieldVisitor::record_str` in encoder.rs.
+        // Empty bodies remain encoded but have no visible text to separate.
         let has_body = body
             .as_ref()
             .is_some_and(|v| v.as_string().is_none_or(|s| !s.is_empty()));
@@ -938,8 +936,9 @@ mod tests {
     /// Guarantees: console text reports structural loss, preserves caller suffixes, and returns I/O errors.
     #[test]
     fn standalone_writer_reports_loss_and_io_errors() {
+        static VALUE: crate::Attribute<str> = crate::Attribute::new("value", "Payload");
         let large = "x".repeat(1024);
-        let record = crate::__log_record_impl!(Level::WARN, "test.bounded", value = large.as_str());
+        let record = crate::__log_record_impl!(Level::WARN, "test.bounded", VALUE = large.as_str());
         assert_eq!(record.as_view().dropped_attributes_count, 1);
         for writer in [ConsoleWriter::no_color(), ConsoleWriter::color()] {
             let mut output = Vec::new();

@@ -106,9 +106,9 @@ mod bounded {
 
     /// Encode the event name from callsite metadata.
     ///
-    /// Emits the bare `callsite.name()` (the first argument to `otel_info!` /
-    /// `otel_warn!` / ...). The tracing target is not prefixed; applications
-    /// can carry it separately in the enclosing OTLP instrumentation scope.
+    /// Emits `callsite.name()`, generated from the source location for slogr
+    /// macros. This is separate from the required body string. Applications can
+    /// carry the tracing target in the enclosing OTLP instrumentation scope.
     pub fn record_event_name<B: BoundedBuf>(buf: &mut B, callsite: SavedCallsite) -> EncodeResult {
         buf.encode_len_delimited(LOG_RECORD_EVENT_NAME, |buf| {
             buf.try_extend_slice(callsite.name().as_bytes())
@@ -306,7 +306,7 @@ mod bounded {
     }
 }
 
-/// Handles the special "message" mapping to body instead of attribute.
+/// Distinguishes the body from attributes, including native tracing events.
 pub enum LogFieldLocation<'a> {
     /// The body.
     Body,
@@ -315,9 +315,14 @@ pub enum LogFieldLocation<'a> {
 }
 
 impl<'a> LogFieldLocation<'a> {
-    fn new(field: &tracing::field::Field) -> Self {
+    fn new(field: &tracing::field::Field, body_first: bool) -> Self {
         let name = field.name();
-        if name == "message" {
+        let is_body = if body_first {
+            field.index() == 0
+        } else {
+            name == "message"
+        };
+        if is_body {
             Self::Body
         } else {
             Self::Attribute(name)
@@ -329,15 +334,32 @@ impl<'a> LogFieldLocation<'a> {
 pub struct DirectFieldVisitor<'buf, B: BoundedBuf> {
     buf: &'buf mut B,
     dropped_count: u32,
+    body_first: bool,
 }
 
 impl<'buf, B: BoundedBuf> DirectFieldVisitor<'buf, B> {
-    /// Create a new DirectFieldVisitor that writes to the provided buffer.
+    /// Visit individual native tracing fields, using its `message` convention.
+    ///
+    /// When recording a complete event, use [`Self::for_event`] instead.
     pub const fn new(buf: &'buf mut B) -> Self {
         Self {
             buf,
             dropped_count: 0,
+            body_first: false,
         }
+    }
+
+    /// Visit an event using either slogr's body-first layout or native tracing's
+    /// message convention. Recognition inspects only the first metadata field.
+    pub fn for_event(buf: &'buf mut B, event: &tracing::Event<'_>) -> Self {
+        let mut visitor = Self::new(buf);
+        visitor.body_first = event
+            .metadata()
+            .fields()
+            .iter()
+            .next()
+            .is_some_and(|field| field.name() == crate::_private::BODY_FIELD_NAME);
+        visitor
     }
 
     /// Returns the number of fields dropped due to size limits.
@@ -356,7 +378,7 @@ impl<'buf, B: BoundedBuf> DirectFieldVisitor<'buf, B> {
 
         // The toplevel call ignores truncation.
         let _ = self.buf.try_atomic(|buf| {
-            match LogFieldLocation::new(field) {
+            match LogFieldLocation::new(field, self.body_first) {
                 LogFieldLocation::Body => {
                     // May be truncated, but not counted in dropped_attributes.
                     bounded::record_body(buf, encode)
@@ -748,10 +770,10 @@ impl<B: BoundedBuf> tracing::field::Visit for DirectFieldVisitor<'_, B> {
     }
 
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        // Only bare empty &str messages are omitted. Formatted messages use
-        // record_debug and preserve empty bodies.
-        if value.is_empty()
-            && let LogFieldLocation::Body = LogFieldLocation::new(field)
+        // Preserve native tracing's empty-message convention, not slogr's required body.
+        if !self.body_first
+            && value.is_empty()
+            && let LogFieldLocation::Body = LogFieldLocation::new(field, false)
         {
             return;
         }
@@ -794,10 +816,10 @@ pub const fn level_to_severity_number(level: &Level) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::StructBox;
     use crate::buffer::{ProtoBuffer, StackProtoBuffer};
     use crate::test_proto::any_value::{Value as AnyValueKind, Value::StringValue};
     use crate::test_proto::{AnyValue, KeyValue, KeyValue as ProtoKeyValue, LogRecord};
-    use crate::{__log_record_impl, StructBox};
     use prost::Message;
     use tracing::field::Visit;
 
@@ -1075,10 +1097,15 @@ mod tests {
     /// Guarantees: the message body is omitted while the empty attribute is preserved.
     #[test]
     fn record_str_omits_empty_message_but_preserves_empty_attribute() {
-        let record =
-            __log_record_impl!(Level::INFO, "test.empty.message", message = "", empty = "");
-        let decoded =
-            LogRecord::decode(record.as_view().body_attrs_bytes).expect("valid log record");
+        let fields = tracing::field::FieldSet::new(
+            &["message", "empty"],
+            tracing::callsite::Identifier(&MESSAGE_TEST_CALLSITE),
+        );
+        let mut buf = StackProtoBuffer::<256>::default();
+        let mut visitor = DirectFieldVisitor::new(&mut buf);
+        visitor.record_str(&fields.field("message").unwrap(), "");
+        visitor.record_str(&fields.field("empty").unwrap(), "");
+        let decoded = LogRecord::decode(buf.as_ref()).expect("valid log record");
         assert!(decoded.body.is_none());
         assert_eq!(
             decoded.attributes,
@@ -1090,16 +1117,18 @@ mod tests {
     /// Guarantees: the empty string body and all attributes remain present without counted drops.
     #[test]
     fn record_debug_preserves_empty_message_and_attribute() {
-        let record = __log_record_impl!(
-            Level::INFO,
-            "test.empty.formatted.message",
-            before = 1i64,
-            message = format_args!("{}", ""),
-            empty = format_args!(""),
-            after = 2i64
+        let fields = tracing::field::FieldSet::new(
+            &["before", "message", "empty", "after"],
+            tracing::callsite::Identifier(&MESSAGE_TEST_CALLSITE),
         );
-        let decoded =
-            LogRecord::decode(record.as_view().body_attrs_bytes).expect("valid log record");
+        let mut buf = StackProtoBuffer::<256>::default();
+        let mut visitor = DirectFieldVisitor::new(&mut buf);
+        visitor.record_i64(&fields.field("before").unwrap(), 1);
+        visitor.record_debug(&fields.field("message").unwrap(), &format_args!("{}", ""));
+        visitor.record_debug(&fields.field("empty").unwrap(), &format_args!(""));
+        visitor.record_i64(&fields.field("after").unwrap(), 2);
+        assert_eq!(visitor.dropped_count(), 0);
+        let decoded = LogRecord::decode(buf.as_ref()).expect("valid log record");
         assert_eq!(decoded.body, Some(AnyValue::new_string("")));
         assert_eq!(
             decoded.attributes,
@@ -1109,7 +1138,6 @@ mod tests {
                 KeyValue::new("after", AnyValue::new_int(2)),
             ]
         );
-        assert_eq!(record.as_view().dropped_attributes_count, 0);
     }
 
     /// Scenario: a bare `&str` `message` body overflows the available buffer.
@@ -1558,7 +1586,7 @@ mod tests {
         }
     }
 
-    /// Scenario: a custom encoder produces a structured `message` with string, integer, and array fields.
+    /// Scenario: a native tracing event supplies a structured `message` with string, integer, and array fields.
     /// Guarantees: the body contains only caller-supplied typed fields, including an ordinary field named name.
     #[test]
     fn structured_message_is_log_body() {
@@ -1567,13 +1595,13 @@ mod tests {
             name: "example".into(),
             tags: vec!["a".into(), "b".into()],
         });
-        let record = __log_record_impl!(
-            Level::INFO,
-            "test.structured_message",
-            message = slot.as_struct()
-        )
-        .into_record();
-        let decoded = LogRecord::decode(record.body_attrs_bytes).expect("valid record");
+        let mut buf = StackProtoBuffer::<256>::default();
+        let mut visitor = DirectFieldVisitor::new(&mut buf);
+        visitor.record_error(
+            &MESSAGE_TEST_METADATA.fields().field("message").unwrap(),
+            slot.as_struct(),
+        );
+        let decoded = LogRecord::decode(buf.as_ref()).expect("valid record");
 
         assert!(decoded.attributes.is_empty());
         assert_eq!(
@@ -1763,16 +1791,17 @@ mod tests {
         }
 
         let slot = StructBox::new(FailAfterWrite);
-        let record = __log_record_impl!(
-            Level::INFO,
-            "test.structured_failure",
-            failed = slot.as_struct(),
-            message = slot.as_struct(),
-            tail = true
-        )
-        .into_record();
-        assert_eq!(record.dropped_attributes_count, 1);
-        let decoded = LogRecord::decode(record.body_attrs_bytes).expect("valid record");
+        let fields = tracing::field::FieldSet::new(
+            &["failed", "message", "tail"],
+            tracing::callsite::Identifier(&MESSAGE_TEST_CALLSITE),
+        );
+        let mut buf = StackProtoBuffer::<256>::default();
+        let mut visitor = DirectFieldVisitor::new(&mut buf);
+        visitor.record_error(&fields.field("failed").unwrap(), slot.as_struct());
+        visitor.record_error(&fields.field("message").unwrap(), slot.as_struct());
+        visitor.record_bool(&fields.field("tail").unwrap(), true);
+        assert_eq!(visitor.dropped_count(), 1);
+        let decoded = LogRecord::decode(buf.as_ref()).expect("valid record");
         assert!(decoded.body.is_none());
         assert_eq!(
             decoded.attributes,

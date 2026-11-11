@@ -48,3 +48,10 @@ Changes for local macro ownership:
   Consumed temporary value sets through callbacks inside their construction
     scope to preserve borrowed-field lifetimes under Rust edition 2024.
   Kept tracing runtime types, field visitors, dispatch, and subscriber behavior.
+
+Subsequent local calling-convention changes:
+  Replaced free-form field syntax with static Attribute<T> declarations.
+  Required one body string first; removed public event-name, parent, target,
+    format-string, message-key, and field-formatting shortcuts.
+  Retained only the callsite, level-check, borrowed-value, and dispatch machinery
+    needed by the typed macros; removed field-name stringification and fake fields.

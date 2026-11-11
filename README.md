@@ -12,8 +12,9 @@ script, or protobuf compiler is required.
 - Heap-backed and stack-backed protobuf buffers with byte budgets and rollback.
 - Typed nested maps/arrays through `StructuredValue` and `StructBox`, with
   truncation markers, per-member budgets, and a depth limit.
-- Named `otel_info!`, `otel_warn!`, `otel_debug!`, `otel_error!`, and `otel_event!`
-  macros, caller-owned `Sampler`/`Logger` hooks, and `raw_error!`.
+- Body-first `otel_info!`, `otel_warn!`, `otel_debug!`, `otel_error!`, and
+  `otel_event!` macros with static `Attribute<T>` declarations.
+- Caller-owned `Sampler`/`Logger` hooks and `raw_error!`.
 - A callback subscriber layer, bounded console formatting, and direct encoding
   of a complete OTLP `LogRecord` message.
 
@@ -24,39 +25,73 @@ The `otel_*` macro names are retained to keep this extraction close to its sourc
 
 ## Locally owned macros
 
-The public calling conventions live in `src/macros.rs`. The necessary event
-macro machinery from `tracing` is copied into `src/macros/event.rs`: argument
-normalization, field names and values, callsite metadata, level checks, and
-event dispatch. Logging macros no longer expand through upstream tracing macros
-or use its private macro-support module.
+The public calling conventions live in `src/macros.rs`. The event machinery in
+`src/macros/event.rs` is adapted from `tracing`: callsite metadata, level checks,
+borrowed field values, and event dispatch. Logging macros do not expand through
+upstream tracing macros or use its private macro-support module.
 
 Tracing still supplies runtime types, callsite registration and interest caching,
 static/runtime level ceilings, the dispatcher, and subscriber integration.
-Existing `otel_*` syntax, lazy field evaluation, caller-owned sampling, parent
-semantics, and direct encoding are preserved. Compatibility tests compare local
-events with upstream events before future syntax changes.
+Body and attribute expressions are evaluated only after filtering and sampling.
+Span macros, instrumentation attributes, and the optional legacy `log` backend
+are not vendored. Enabling `tracing/log` elsewhere does not add a `log` backend.
 
-Only the currently used event machinery is copied. Span macros, instrumentation
-attributes, unnamed/untargeted macro forms, and the optional legacy `log` backend
-are not vendored. Enabling `tracing/log` elsewhere does not add a `log` backend
-to slogr's locally owned macros.
+## Typed attributes and body-first syntax
+
+```rust
+use slogr::{Attribute, otel_info};
+
+mod attributes {
+    use slogr::Attribute;
+    pub static COUNT: Attribute<u64> =
+        Attribute::new("item.count", "Number of received items");
+}
+use attributes::COUNT as my_attribute;
+
+let count: u64 = 42;
+otel_info!("Items received", my_attribute = count);
+```
+
+The required first argument is one string body, not an event name or format
+string. It can be a literal, `&str`, or `String` expression. Braces are literal;
+there are no trailing format arguments. Tracing event names are generated from
+source locations, and targets default to the emitting package name.
+
+Every attribute key must resolve to an `Attribute<T>` declaration, using an
+imported name or a qualified Rust path. Its declared name becomes the wire key;
+its description is stored but not emitted. Values must borrow as `T` through
+`Borrow<T>` and are encoded natively. `Attribute<str>` accepts `&str` and `String`;
+numeric types are not implicitly converted. Wrong types and undeclared keys
+are compile errors, even for filtered events.
+
+There are no shorthand fields, free-form string keys, `?`/`%` overrides, or
+`name:`, `parent:`, and `target:` options. `message = ...` is not a body shortcut:
+it works only if `message` resolves to a declared attribute, and is then an
+ordinary attribute. The type contract follows the descriptor, not a global
+registry of attribute names.
+
+For sampling, use `otel_info!(body, logger: logger, ATTRIBUTE = value)`.
+For runtime severity, use `otel_event!(body, level, ATTRIBUTE = value)`.
+`raw_error!(body, ATTRIBUTE = value)` uses the same typed syntax without filtering.
+Ordinary third-party tracing events remain supported by the subscriber layer
+with their native message convention; slogr's type checks apply to its own macros.
 
 ## Capture encoded records
 
 ```rust
-use slogr::{LogRecordLayer, otel_info};
+use slogr::{Attribute, LogRecordLayer, otel_info};
 use tracing_subscriber::prelude::*;
 
+static WORKERS: Attribute<u64> = Attribute::new("workers", "Worker count");
 let subscriber = tracing_subscriber::registry().with(LogRecordLayer::new(
     |_time, record| {
-        assert_eq!(record.callsite().name(), "worker.ready");
         assert!(!record.body_attrs_bytes.is_empty());
         // Retain or enqueue the owned record here.
     },
 ));
 
 tracing::subscriber::with_default(subscriber, || {
-    otel_info!("worker.ready", workers = 4, message = "ready");
+    otel_info!("Workers ready", WORKERS = 4);
 });
 ```
 
@@ -68,13 +103,14 @@ holding a thread-local default guard across an await.
 ## Console output
 
 ```rust
-use slogr::{ConsoleWriter, RawLoggingLayer, otel_info};
+use slogr::{Attribute, ConsoleWriter, RawLoggingLayer, otel_info};
 use tracing_subscriber::prelude::*;
 
+static WORKERS: Attribute<u64> = Attribute::new("workers", "Worker count");
 let subscriber = tracing_subscriber::registry()
     .with(RawLoggingLayer::new(ConsoleWriter::no_color()));
 tracing::subscriber::with_default(subscriber, || {
-    otel_info!("worker.ready", workers = 4);
+    otel_info!("Workers ready", WORKERS = 4);
 });
 ```
 
@@ -86,7 +122,10 @@ which return `std::io::Result`. No background writer or global state is installe
 ## Structured values
 
 ```rust
-use slogr::{EncodeResult, StructBox, StructuredValue, ValueWriter, otel_info};
+use slogr::{Attribute, EncodeResult, StructBox, StructuredValue, ValueWriter, otel_info};
+
+static POSITION: Attribute<dyn std::error::Error> =
+    Attribute::new("position", "Current position");
 
 struct Position { x: i64, y: i64 }
 
@@ -101,7 +140,7 @@ impl StructuredValue for Position {
 
 let mut position = StructBox::new(Position { x: 1, y: 2 });
 position.x = 3;
-otel_info!("position.changed", position = position.as_struct());
+otel_info!("Position changed", POSITION = position.as_struct());
 ```
 
 Pass `as_struct()` directly, without `?` or `%`. The box is allocated once and

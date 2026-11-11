@@ -14,6 +14,7 @@
 
 #![doc = include_str!("../README.md")]
 
+mod attribute;
 pub mod buffer;
 mod consts;
 pub mod encoder;
@@ -32,6 +33,7 @@ use std::fmt;
 use tracing::callsite::Identifier;
 use tracing::{Event, Metadata};
 
+pub use attribute::Attribute;
 pub use encoder::DirectLogRecordEncoder;
 pub use formatter::{
     AnsiCode, ColorMode, ConsoleWriter, RawLoggingLayer, StyledBufWriter,
@@ -118,7 +120,7 @@ impl SavedCallsite {
         self.metadata.target()
     }
 
-    /// Event name.
+    /// Tracing event name, generated from source locations by slogr macros.
     #[must_use]
     pub fn name(&self) -> &'static str {
         self.metadata.name()
@@ -140,7 +142,7 @@ impl StackLogRecord {
     pub fn new(event: &Event<'_>) -> Self {
         let mut buf = StackProtoBuffer::default();
         let dropped_count = {
-            let mut visitor = DirectFieldVisitor::new(&mut buf);
+            let mut visitor = DirectFieldVisitor::for_event(&mut buf, event);
             event.record(&mut visitor);
             visitor.dropped_count()
         };
@@ -188,7 +190,7 @@ impl LogRecord {
     pub fn new_bounded<const INITIAL: usize, const LIMIT: usize>(event: &Event<'_>) -> Self {
         let mut buf = ProtoBuffer::with_capacity_and_limit(INITIAL, LIMIT);
         let dropped_count = {
-            let mut visitor = DirectFieldVisitor::new(&mut buf);
+            let mut visitor = DirectFieldVisitor::for_event(&mut buf, event);
             event.record(&mut visitor);
             visitor.dropped_count()
         };
