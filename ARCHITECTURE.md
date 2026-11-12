@@ -147,6 +147,27 @@ let handle = my_session.new(<expression>);
 info!("new session {}", handle);
 ```
 
+Logging entity values has the effect of placing a reference to the
+entity value in the log using a reference.
+
+## Arguments
+
+Message format strings must contain exactly as many placeholders as
+there are positional arguments at the callsite. When >= 1 argument is
+present, the structured values are placed under the `args` section of
+the body, as a list.
+
+```
+{
+  ...
+  "args": [
+    <first_arg>,
+    <second_arg>,
+    ...
+  ]
+}
+```
+
 ## References
 
 When an entity handle is used, it will be placed in the log record
@@ -170,12 +191,19 @@ is required, a `Arc<Mutex<_>>` or `OnceLock` may be required, however
 this is not initially required.)
 
 An entity reference will appear using the "$ref" key (like JSON
-Schema). For example, to log a reference using an entity handle that
-was already defined (from prior use), the reference will appear like
-`{ "$ref": "<record_uuid>#defs/my_thing:thing_name" }`.
+Schema). For example, to log a reference using an entity handle that ,
+the value will appear as a reference like `{ "$ref":
+"<record_uuid>#defs/my_thing:thing_name" }`, in addition to being
+placed in `defs` on first use.
 
-References are also used to convey entity associations within a log
-record.... @@@
+References are also used to convey an association between attributes
+and positional arguments. For example, when a log statement uses an
+`my_attr = entity_hande` argument, two associations are in effect:
+
+1. One reference to `my_thing:thing_name` appears as a `$ref` value
+   in `args[0]`, referring to the entity value, e.g., as shown above.
+2. One reference appears in the record attributes, e.g. `{ "my_attr":
+   { "$ref": "#args/0" } }`, referring to the same entity value.
 
 ## Additional context
 
