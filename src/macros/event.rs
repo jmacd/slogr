@@ -11,8 +11,8 @@ use tracing::subscriber::Interest;
 pub const BODY_FIELD_NAME: &str = "__slogr_body";
 
 #[inline]
-pub fn body(value: &str) -> &str {
-    value
+pub fn body<V: AsRef<str> + ?Sized>(value: &V) -> &str {
+    value.as_ref()
 }
 
 pub fn is_enabled(meta: &Metadata<'static>, interest: Interest) -> bool {
@@ -58,6 +58,8 @@ macro_rules! __slogr_level_enabled {
 #[macro_export]
 macro_rules! __slogr_values {
     ($fields:expr, $consume:expr; $body:expr; $($attribute:path = $value:expr),*) => {{
+        #[allow(unused_imports)]
+        use $crate::_private::AttributeValue as _;
         // Consume borrows in their construction scope, including Rust 2024 temporaries.
         // The value expressions remain outside the callback so `?` and nested logs work.
         ($consume)($fields.value_set_all(&[
@@ -66,7 +68,7 @@ macro_rules! __slogr_values {
             ),
             $(
                 $crate::_private::Option::Some(
-                    &$crate::Attribute::__value(&$attribute, &$value)
+                    &($attribute).__value(&$value)
                         as &dyn $crate::_private::field::Value
                 )
             ),*

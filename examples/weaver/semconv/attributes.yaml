@@ -1,0 +1,24 @@
+groups:
+  - id: registry.slogr_example
+    type: attribute_group
+    brief: Attributes used by the slogr example process.
+    attributes:
+      - ref: service.name
+      - ref: server.port
+        annotations:
+          slogr:
+            type: u64
+      - id: example.requests
+        type: int
+        brief: Number of requests processed.
+        stability: development
+        annotations:
+          slogr:
+            type: u64
+      - id: example.retryable
+        type: boolean
+        brief: Whether retrying the operation is appropriate.
+        stability: development
+        annotations:
+          slogr:
+            type: bool

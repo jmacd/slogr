@@ -2,8 +2,9 @@
 
 An independent starting point for bounded, structured logging built on Tokio's
 `tracing` ecosystem. Extracted from OpenTelemetry Arrow's internal logging
-implementation; no Arrow, dataflow engine, OpenTelemetry SDK, submodules, build
-script, or protobuf compiler is required.
+implementation. The runtime crate needs no Arrow, dataflow engine, OpenTelemetry
+SDK, submodules, build script, or protobuf compiler. Applications can optionally
+generate their attribute declarations at build time using Weaver.
 
 ## What is here
 
@@ -14,6 +15,8 @@ script, or protobuf compiler is required.
   truncation markers, per-member budgets, and a depth limit.
 - Body-first `otel_info!`, `otel_warn!`, `otel_debug!`, `otel_error!`, and
   `otel_event!` macros with static `Attribute<T>` declarations.
+- An application `build.rs` helper, `slogr-build`, for generating lowercase
+  attribute declarations from Weaver registries.
 - Caller-owned `Sampler`/`Logger` hooks and `raw_error!`.
 - A callback subscriber layer, bounded console formatting, and direct encoding
   of a complete OTLP `LogRecord` message.
@@ -36,7 +39,70 @@ Body and attribute expressions are evaluated only after filtering and sampling.
 Span macros, instrumentation attributes, and the optional legacy `log` backend
 are not vendored. Enabling `tracing/log` elsewhere does not add a `log` backend.
 
+## Generate application attributes with Weaver
+
+Declare custom attributes or reference standard conventions in an application
+Weaver registry. Use `slogr-build` as a build-dependency and select the groups
+the application uses in `build.rs`:
+
+```rust,ignore
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    slogr_build::Builder::new("semconv")
+        .group("registry.my_app")
+        .generate()?;
+    Ok(())
+}
+```
+
+In the application:
+
+```rust,ignore
+include!(concat!(env!("OUT_DIR"), "/slogr_attributes.rs"));
+use attributes::{my_app_requests, service_name};
+use slogr::otel_info;
+
+let service = String::from("my-app");
+otel_info!("Request received", service_name = &service, my_app_requests = 1u64);
+```
+
+Generated statics use lowercase names. The generated `attributes` module carries
+`#![allow(non_upper_case_globals)]`; application developers need neither the lint
+allowance nor handwritten declarations.
+
+Rust types **default to `str`**, independently of Weaver's built-in type. Set the
+`slogr` annotation when a different Rust type is needed, including on standard
+attribute references:
+
+```yaml
+annotations:
+  slogr:
+    type: u64
+```
+
+See [slogr-build](crates/slogr-build/README.md) for registry configuration,
+dependency setup, input tracking, and errors. The runnable
+`examples/weaver` application uses the standard `service.name` and `server.port`
+attributes plus custom declarations:
+
+```sh
+git submodule update --init tools/weaver
+cd tools/weaver/ui
+pnpm install --frozen-lockfile
+pnpm build
+cd ../../..
+cargo build --manifest-path tools/weaver/Cargo.toml --locked --bin weaver
+export SLOGR_WEAVER="$PWD/tools/weaver/target/debug/weaver"
+cargo run -p slogr-weaver-example
+```
+
+The default workspace build does not require Weaver; the example is an opt-in
+workspace member. Weaver and its schema dependencies stay out of slogr's runtime.
+The `jmacd/weaver` submodule carries a local fix for Weaver 0.28.0's project and
+template configuration option collision; use that binary for code generation.
+
 ## Typed attributes and body-first syntax
+
+The low-level declaration API remains available for handwritten schemas:
 
 ```rust
 use slogr::{Attribute, otel_info};
@@ -53,15 +119,17 @@ otel_info!("Items received", my_attribute = count);
 ```
 
 The required first argument is one string body, not an event name or format
-string. It can be a literal, `&str`, or `String` expression. Braces are literal;
+string. It accepts `AsRef<str>` inputs, including `String`, `&String`, and
+`Cow<str>`, without formatting or allocation. Braces are literal;
 there are no trailing format arguments. Tracing event names are generated from
 source locations, and targets default to the emitting package name.
 
 Every attribute key must resolve to an `Attribute<T>` declaration, using an
 imported name or a qualified Rust path. Its declared name becomes the wire key;
-its description is stored but not emitted. Values must borrow as `T` through
-`Borrow<T>` and are encoded natively. `Attribute<str>` accepts `&str` and `String`;
-numeric types are not implicitly converted. Wrong types and undeclared keys
+its description is stored but not emitted. String attributes accept any
+`AsRef<str>` input. Other values must borrow as `T` through `Borrow<T>` and are
+encoded natively; numeric types are not implicitly converted.
+Wrong types and undeclared keys
 are compile errors, even for filtered events.
 
 There are no shorthand fields, free-form string keys, `?`/`%` overrides, or

@@ -11,6 +11,7 @@ use tracing::{Dispatch, Event, Metadata};
 #[doc(hidden)]
 pub mod _private {
     pub use super::event::{BODY_FIELD_NAME, body, is_enabled};
+    pub use crate::attribute::AttributeValue;
     pub use core::{concat, file, line, module_path, option::Option};
     pub use tracing::callsite::{Callsite, DefaultCallsite, Identifier};
     pub use tracing::dispatcher::get_default;
@@ -56,7 +57,7 @@ impl<L: Logger + ?Sized> Logger for &mut L {
 /// ```
 ///
 /// The first argument is always the body, not an event name or format string.
-/// It may be a string literal, borrowed string, or `String` expression.
+/// It accepts any `AsRef<str>` input, including borrowed or owned strings.
 /// Each remaining field is `ATTRIBUTE = value`, where `ATTRIBUTE` names a
 /// static [`crate::Attribute<T>`]. An optional `logger: expression` immediately
 /// after the body supplies a caller-owned [`Sampler`] and [`Logger`].

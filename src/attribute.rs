@@ -23,9 +23,10 @@ use std::{borrow::Borrow, marker::PhantomData};
 /// otel_info!("Items received", my_attribute = 42u64);
 /// ```
 ///
-/// `Attribute<str>` accepts `&str` and `String` values. Inputs must implement
-/// [`Borrow<T>`], not a numeric conversion; the borrowed `T` is what is encoded.
-/// `T` must support tracing's native `Value` interface.
+/// `Attribute<str>` accepts any [`AsRef<str>`] input, including `String`,
+/// `&String`, `Cow<str>`, and custom string wrappers, without allocating.
+/// Other attributes require [`Borrow<T>`], not a numeric conversion.
+/// The borrowed `T` is what is encoded through tracing's native `Value` interface.
 ///
 /// A mismatched type fails even if the event would be filtered out:
 ///
@@ -83,10 +84,25 @@ impl<T: ?Sized> Attribute<T> {
     pub const fn description(&self) -> &'static str {
         self.description
     }
+}
 
+impl Attribute<str> {
     #[doc(hidden)]
     #[inline]
-    pub fn __value<'a, V: Borrow<T> + ?Sized>(&self, value: &'a V) -> &'a T {
+    pub fn __value<'a, V: AsRef<str> + ?Sized>(&self, value: &'a V) -> &'a str {
+        value.as_ref()
+    }
+}
+
+/// Fallback binding for non-string attributes; strings use the inherent AsRef method.
+#[doc(hidden)]
+pub trait AttributeValue<T: ?Sized> {
+    fn __value<'a, V: Borrow<T> + ?Sized>(&self, value: &'a V) -> &'a T;
+}
+
+impl<T: ?Sized> AttributeValue<T> for Attribute<T> {
+    #[inline]
+    fn __value<'a, V: Borrow<T> + ?Sized>(&self, value: &'a V) -> &'a T {
         value.borrow()
     }
 }

@@ -12,6 +12,45 @@ use tracing_subscriber::prelude::*;
 static COUNT: Attribute<u64> = Attribute::new("count", "Number of items");
 static READY: Attribute<bool> = Attribute::new("ready", "Readiness");
 
+/// Scenario: string bodies and attributes borrow from standard ownership types and an AsRef-only wrapper.
+/// Guarantees: every representation encodes the same string without moving the input or requiring Display.
+#[test]
+fn string_inputs_use_as_ref() {
+    use std::borrow::Cow;
+    use std::rc::Rc;
+
+    static TEXT: Attribute<str> = Attribute::new("text", "Borrowed text");
+    struct Text(String);
+    impl AsRef<str> for Text {
+        fn as_ref(&self) -> &str {
+            &self.0
+        }
+    }
+    fn check<V: AsRef<str>>(value: V) {
+        let record = slogr::__log_record_impl!(Level::INFO, &value, TEXT = &value).into_record();
+        assert_eq!(body(&record), "text");
+        let view = RawLogRecord::new(&record.body_attrs_bytes);
+        let attrs = view.attributes().collect::<Vec<_>>();
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(
+            attrs[0].value().unwrap().as_string(),
+            Some(b"text".as_slice())
+        );
+        assert_eq!(value.as_ref(), "text");
+    }
+    let owned = String::from("text");
+    check("text");
+    check(&owned);
+    check::<&&String>(&&owned);
+    check(owned);
+    check(Cow::Borrowed("text"));
+    check(Cow::<'_, str>::Owned(String::from("text")));
+    check(Box::<str>::from("text"));
+    check(Rc::<str>::from("text"));
+    check(Arc::<str>::from("text"));
+    check(Text(String::from("text")));
+}
+
 #[derive(Clone, Default)]
 struct Capture {
     // A tracing Dispatch is shareable; the mutex lets tests inspect its captured events.
